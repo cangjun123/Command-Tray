@@ -5,6 +5,8 @@ python -m PyInstaller `
   --clean `
   --onefile `
   --windowed `
+  --icon icon.ico `
+  --add-data "icon.ico;." `
   --name CommandTray `
   main.pyw
 

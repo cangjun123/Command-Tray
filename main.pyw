@@ -22,8 +22,17 @@ def get_app_dir():
     return Path(__file__).resolve().parent
 
 
+def get_resource_dir():
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        return Path(bundle_dir)
+    return Path(__file__).resolve().parent
+
+
 APP_DIR = get_app_dir()
+RESOURCE_DIR = get_resource_dir()
 CONFIG_PATH = APP_DIR / "config.json"
+ICON_PATH = RESOURCE_DIR / "icon.ico"
 APP_NAME = "Command Tray"
 LOG_LIMIT = 1000
 STOP_TIMEOUT_SECONDS = 3
@@ -195,6 +204,9 @@ class WindowsTrayIcon:
     NIIF_WARNING = 0x00000002
 
     IDI_APPLICATION = 32512
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x00000010
+    LR_DEFAULTSIZE = 0x00000040
     MF_STRING = 0x00000000
     TPM_RIGHTBUTTON = 0x00000002
 
@@ -217,6 +229,7 @@ class WindowsTrayIcon:
         self.NOTIFYICONDATAW = None
         self.last_error = ""
         self._backend = None
+        self._hicon = None
 
     def start(self):
         if os.name != "nt":
@@ -288,7 +301,7 @@ class WindowsTrayIcon:
             wc.hInstance = hinstance
             wc.lpszClassName = class_name
             wc.lpfnWndProc = message_map
-            wc.hIcon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+            wc.hIcon = self._load_icon_pywin32()
             atom = win32gui.RegisterClass(wc)
             hwnd = win32gui.CreateWindow(
                 atom,
@@ -316,11 +329,33 @@ class WindowsTrayIcon:
         import win32con
         import win32gui
 
-        hicon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+        hicon = self._load_icon_pywin32()
         flags = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
         data = (self.hwnd, 0, flags, self.WM_TRAY, hicon, self.app_name[:127])
         win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, data)
         self._icon_added = True
+
+    def _load_icon_pywin32(self):
+        import win32con
+        import win32gui
+
+        if self._hicon:
+            return self._hicon
+        if ICON_PATH.exists():
+            try:
+                self._hicon = win32gui.LoadImage(
+                    0,
+                    str(ICON_PATH),
+                    self.IMAGE_ICON,
+                    0,
+                    0,
+                    self.LR_LOADFROMFILE | self.LR_DEFAULTSIZE,
+                )
+                return self._hicon
+            except Exception:
+                pass
+        self._hicon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+        return self._hicon
 
     def _delete_icon_pywin32(self):
         if not self._icon_added or not self.hwnd:
@@ -340,7 +375,7 @@ class WindowsTrayIcon:
             import win32con
             import win32gui
 
-            hicon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+            hicon = self._load_icon_pywin32()
             flags = win32gui.NIF_INFO | win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
             info_flags = win32gui.NIIF_WARNING if warning else win32gui.NIIF_INFO
             data = (
@@ -367,7 +402,7 @@ class WindowsTrayIcon:
             import win32con
             import win32gui
 
-            hicon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+            hicon = self._load_icon_pywin32()
             flags = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
             data = (self.hwnd, 0, flags, self.WM_TRAY, hicon, str(text)[:127])
             win32gui.Shell_NotifyIcon(win32gui.NIM_MODIFY, data)
@@ -497,7 +532,7 @@ class WindowsTrayIcon:
             wc.lpfnWndProc = self._wndproc
             wc.hInstance = hinstance
             wc.lpszClassName = self._class_name
-            wc.hIcon = self.user32.LoadIconW(None, self.ctypes.c_void_p(self.IDI_APPLICATION))
+            wc.hIcon = self._load_icon()
             wc.hIconSm = wc.hIcon
 
             if not self.user32.RegisterClassExW(ctypes.byref(wc)):
@@ -574,6 +609,15 @@ class WindowsTrayIcon:
         ]
         self.user32.LoadIconW.restype = hicon_type
         self.user32.LoadIconW.argtypes = [self.wintypes.HINSTANCE, self.ctypes.c_void_p]
+        self.user32.LoadImageW.restype = hicon_type
+        self.user32.LoadImageW.argtypes = [
+            hinstance_type,
+            self.wintypes.LPCWSTR,
+            self.wintypes.UINT,
+            self.ctypes.c_int,
+            self.ctypes.c_int,
+            self.wintypes.UINT,
+        ]
         self.user32.PostMessageW.argtypes = [
             self.wintypes.HWND,
             self.wintypes.UINT,
@@ -585,13 +629,31 @@ class WindowsTrayIcon:
     def _add_icon(self):
         nid = self._make_nid(self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP)
         nid.uCallbackMessage = self.WM_TRAY
-        nid.hIcon = self.user32.LoadIconW(None, self.ctypes.c_void_p(self.IDI_APPLICATION))
+        nid.hIcon = self._load_icon()
         nid.szTip = self.app_name[:127]
         self._icon_added = bool(self.shell32.Shell_NotifyIconW(self.NIM_ADD, self.ctypes.byref(nid)))
         if self._icon_added:
             version_nid = self._make_nid(0)
             version_nid.uTimeoutOrVersion = self.NOTIFYICON_VERSION_4
             self.shell32.Shell_NotifyIconW(self.NIM_SETVERSION, self.ctypes.byref(version_nid))
+
+    def _load_icon(self):
+        if self._hicon:
+            return self._hicon
+        if ICON_PATH.exists():
+            hicon = self.user32.LoadImageW(
+                None,
+                str(ICON_PATH),
+                self.IMAGE_ICON,
+                0,
+                0,
+                self.LR_LOADFROMFILE | self.LR_DEFAULTSIZE,
+            )
+            if hicon:
+                self._hicon = hicon
+                return self._hicon
+        self._hicon = self.user32.LoadIconW(None, self.ctypes.c_void_p(self.IDI_APPLICATION))
+        return self._hicon
 
     def _delete_icon(self):
         if self._icon_added and self.shell32 is not None and self.hwnd:
@@ -648,6 +710,7 @@ class SSHLHelperApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_NAME)
+        self.configure_window_icon()
         self.root.minsize(920, 520)
 
         self.tunnels = []
@@ -672,6 +735,14 @@ class SSHLHelperApp:
         self.root.bind("<Map>", self.on_map)
         self.root.after(100, self.process_events)
         self.root.after(300, self.start_enabled_tunnels)
+
+    def configure_window_icon(self):
+        if os.name != "nt" or not ICON_PATH.exists():
+            return
+        try:
+            self.root.iconbitmap(default=str(ICON_PATH))
+        except tk.TclError:
+            pass
 
     def configure_fonts(self):
         families = set(tkfont.families(self.root))
@@ -1341,8 +1412,20 @@ def enable_high_dpi():
         pass
 
 
+def configure_windows_app_id():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("cangjun.CommandTray")
+    except Exception:
+        pass
+
+
 def main():
     enable_high_dpi()
+    configure_windows_app_id()
     if "--tray-smoke-test" in sys.argv:
         events = queue.Queue()
         tray = WindowsTrayIcon(APP_NAME, events)
