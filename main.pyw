@@ -36,6 +36,21 @@ ICON_PATH = RESOURCE_DIR / "icon.ico"
 APP_NAME = "Command Tray"
 LOG_LIMIT = 1000
 STOP_TIMEOUT_SECONDS = 3
+SINGLE_INSTANCE_MUTEX = "Local\\cangjun.CommandTray.SingleInstance"
+SINGLE_INSTANCE_WINDOW_CLASS = "cangjun.CommandTray.SingleInstanceWindow"
+SHOW_MAIN_WINDOW_MESSAGE = 0x8000 + 2
+RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE_NAME = APP_NAME
+START_HIDDEN_ARG = "--start-hidden"
+
+
+def set_tk_window_icon(window):
+    if os.name != "nt" or not ICON_PATH.exists():
+        return
+    try:
+        window.iconbitmap(default=str(ICON_PATH))
+    except tk.TclError:
+        pass
 
 
 @dataclass
@@ -61,6 +76,7 @@ class TunnelDialog:
         self.result = None
         self.window = tk.Toplevel(parent)
         self.window.title(title)
+        set_tk_window_icon(self.window)
         self.window.transient(parent)
         self.window.grab_set()
         self.window.resizable(True, False)
@@ -138,6 +154,7 @@ class LogWindow:
         self.tunnel_id = tunnel_id
         self.window = tk.Toplevel(app.root)
         self.window.title(f"日志 - {title}")
+        set_tk_window_icon(self.window)
         self.window.geometry("860x460")
         self.window.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -706,11 +723,246 @@ class WindowsTrayIcon:
             self.user32.DestroyMenu(menu)
 
 
+class SingleInstanceGuard:
+    ERROR_ALREADY_EXISTS = 183
+    HWND_MESSAGE = -3
+
+    def __init__(self):
+        self.mutex = None
+        self.hwnd = None
+        self._wndproc = None
+        self.user32 = None
+        self.kernel32 = None
+        self.ctypes = None
+        self.wintypes = None
+        self._callback = None
+        self.owns_mutex = False
+
+    def acquire(self):
+        if os.name != "nt":
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            self.ctypes = ctypes
+            self.wintypes = wintypes
+            self.user32 = ctypes.windll.user32
+            self.kernel32 = ctypes.windll.kernel32
+            self.kernel32.CreateMutexW.restype = wintypes.HANDLE
+            self.kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+            self.kernel32.GetLastError.restype = wintypes.DWORD
+            self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            self.kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+
+            self.mutex = self.kernel32.CreateMutexW(None, True, SINGLE_INSTANCE_MUTEX)
+            if not self.mutex:
+                return True
+            if self.kernel32.GetLastError() == self.ERROR_ALREADY_EXISTS:
+                self.notify_existing_instance()
+                self.kernel32.CloseHandle(self.mutex)
+                self.mutex = None
+                return False
+            self.owns_mutex = True
+            return True
+        except Exception:
+            return True
+
+    def notify_existing_instance(self):
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.FindWindowExW.restype = wintypes.HWND
+            user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+            user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            message_window_parent = wintypes.HWND(self.HWND_MESSAGE)
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                hwnd = user32.FindWindowExW(message_window_parent, None, SINGLE_INSTANCE_WINDOW_CLASS, None)
+                if hwnd:
+                    user32.PostMessageW(hwnd, SHOW_MAIN_WINDOW_MESSAGE, 0, 0)
+                    return
+                time.sleep(0.05)
+        except Exception:
+            pass
+
+    def start_listener(self, callback):
+        if os.name != "nt" or self.user32 is None or self.kernel32 is None:
+            return
+        self._callback = callback
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            LRESULT = getattr(wintypes, "LRESULT", ctypes.c_ssize_t)
+            HINSTANCE = getattr(wintypes, "HINSTANCE", wintypes.HANDLE)
+            HICON = getattr(wintypes, "HICON", wintypes.HANDLE)
+            HCURSOR = getattr(wintypes, "HCURSOR", wintypes.HANDLE)
+            HBRUSH = getattr(wintypes, "HBRUSH", wintypes.HANDLE)
+            HMENU = getattr(wintypes, "HMENU", wintypes.HANDLE)
+            LPVOID = getattr(wintypes, "LPVOID", ctypes.c_void_p)
+            WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+            class WNDCLASSEXW(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.UINT),
+                    ("style", wintypes.UINT),
+                    ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", HINSTANCE),
+                    ("hIcon", HICON),
+                    ("hCursor", HCURSOR),
+                    ("hbrBackground", HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR),
+                    ("hIconSm", HICON),
+                ]
+
+            self._wndproc = WNDPROC(self._window_proc)
+            self.user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+            self.user32.RegisterClassExW.restype = wintypes.ATOM
+            self.user32.CreateWindowExW.restype = wintypes.HWND
+            self.user32.CreateWindowExW.argtypes = [
+                wintypes.DWORD,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.HWND,
+                HMENU,
+                HINSTANCE,
+                LPVOID,
+            ]
+            self.user32.DefWindowProcW.restype = LRESULT
+            self.user32.DefWindowProcW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            self.kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+            self.kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
+            hinstance = self.kernel32.GetModuleHandleW(None)
+            wc = WNDCLASSEXW()
+            wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+            wc.lpfnWndProc = self._wndproc
+            wc.hInstance = hinstance
+            wc.lpszClassName = SINGLE_INSTANCE_WINDOW_CLASS
+            self.user32.RegisterClassExW(ctypes.byref(wc))
+            self.hwnd = self.user32.CreateWindowExW(
+                0,
+                SINGLE_INSTANCE_WINDOW_CLASS,
+                APP_NAME,
+                0,
+                0,
+                0,
+                0,
+                0,
+                self.HWND_MESSAGE,
+                None,
+                hinstance,
+                None,
+            )
+        except Exception:
+            self.hwnd = None
+
+    def _window_proc(self, hwnd, msg, wparam, lparam):
+        if msg == SHOW_MAIN_WINDOW_MESSAGE:
+            if self._callback is not None:
+                self._callback()
+            return 0
+        return self.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def close(self):
+        if os.name != "nt":
+            return
+        try:
+            if self.hwnd and self.user32 is not None:
+                self.user32.DestroyWindow(self.hwnd)
+                self.hwnd = None
+        except Exception:
+            pass
+        try:
+            if self.mutex and self.kernel32 is not None:
+                if self.owns_mutex:
+                    self.kernel32.ReleaseMutex(self.mutex)
+                    self.owns_mutex = False
+                self.kernel32.CloseHandle(self.mutex)
+                self.mutex = None
+        except Exception:
+            pass
+
+
+class WindowsStartupManager:
+    @staticmethod
+    def is_supported():
+        return os.name == "nt"
+
+    @staticmethod
+    def get_command():
+        if getattr(sys, "frozen", False):
+            return f'"{Path(sys.executable).resolve()}" {START_HIDDEN_ARG}'
+        executable = Path(sys.executable).resolve()
+        pythonw = executable.with_name("pythonw.exe")
+        if pythonw.exists():
+            executable = pythonw
+        script = Path(__file__).resolve()
+        return f'"{executable}" "{script}" {START_HIDDEN_ARG}'
+
+    @staticmethod
+    def is_enabled():
+        if not WindowsStartupManager.is_supported():
+            return False
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH) as key:
+                value, _value_type = winreg.QueryValueEx(key, RUN_VALUE_NAME)
+            return value == WindowsStartupManager.get_command()
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def set_enabled(enabled):
+        if not WindowsStartupManager.is_supported():
+            raise RuntimeError("开机自启动仅支持 Windows。")
+        try:
+            import winreg
+
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                RUN_KEY_PATH,
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                if enabled:
+                    winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ, WindowsStartupManager.get_command())
+                else:
+                    try:
+                        winreg.DeleteValue(key, RUN_VALUE_NAME)
+                    except FileNotFoundError:
+                        pass
+        except Exception as exc:
+            raise RuntimeError(f"更新开机自启动失败：{exc}") from exc
+
+
 class SSHLHelperApp:
-    def __init__(self, root):
+    def __init__(self, root, instance_guard=None):
         self.root = root
+        self.instance_guard = instance_guard
         self.root.title(APP_NAME)
-        self.configure_window_icon()
+        set_tk_window_icon(self.root)
         self.root.minsize(920, 520)
 
         self.tunnels = []
@@ -722,6 +974,7 @@ class SSHLHelperApp:
         self.exit_confirmed = False
         self.tray = None
         self.tray_error = ""
+        self.startup_var = tk.BooleanVar(value=WindowsStartupManager.is_enabled())
 
         self.configure_fonts()
         self.configure_style()
@@ -735,14 +988,8 @@ class SSHLHelperApp:
         self.root.bind("<Map>", self.on_map)
         self.root.after(100, self.process_events)
         self.root.after(300, self.start_enabled_tunnels)
-
-    def configure_window_icon(self):
-        if os.name != "nt" or not ICON_PATH.exists():
-            return
-        try:
-            self.root.iconbitmap(default=str(ICON_PATH))
-        except tk.TclError:
-            pass
+        if START_HIDDEN_ARG in sys.argv:
+            self.root.after(50, self.hide_to_tray)
 
     def configure_fonts(self):
         families = set(tkfont.families(self.root))
@@ -808,7 +1055,16 @@ class SSHLHelperApp:
         toolbar.grid(row=0, column=1, sticky="e")
         ttk.Button(toolbar, text="新增", command=self.add_tunnel).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(toolbar, text="保存配置", command=self.save_config_with_notice).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(toolbar, text="停止全部", command=self.stop_all).grid(row=0, column=2)
+        ttk.Button(toolbar, text="停止全部", command=self.stop_all).grid(row=0, column=2, padx=(0, 10))
+        startup_check = ttk.Checkbutton(
+            toolbar,
+            text="开机自启动",
+            variable=self.startup_var,
+            command=self.toggle_startup,
+        )
+        startup_check.grid(row=0, column=3)
+        if not WindowsStartupManager.is_supported():
+            startup_check.state(["disabled"])
 
         body = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         body.grid(row=1, column=0, sticky="nsew")
@@ -878,6 +1134,11 @@ class SSHLHelperApp:
             self.root.state("normal")
         except tk.TclError:
             pass
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.after(250, lambda: self.root.attributes("-topmost", False))
+        except tk.TclError:
+            pass
         self.root.lift()
         self.root.focus_force()
 
@@ -895,6 +1156,20 @@ class SSHLHelperApp:
             return
         running = sum(1 for tunnel in self.tunnels if self.is_running(tunnel.id))
         self.tray.update_tooltip(f"{APP_NAME} - {running}/{len(self.tunnels)} running")
+
+    def request_show_from_other_instance(self):
+        self.events.put(("show_existing_instance",))
+
+    def toggle_startup(self):
+        desired = self.startup_var.get()
+        try:
+            WindowsStartupManager.set_enabled(desired)
+            self.startup_var.set(WindowsStartupManager.is_enabled())
+            self.set_status_text()
+        except Exception as exc:
+            self.startup_var.set(WindowsStartupManager.is_enabled())
+            self.set_status_text()
+            messagebox.showerror("开机自启动设置失败", str(exc), parent=self.root)
 
     def load_config(self):
         if not CONFIG_PATH.exists():
@@ -1069,7 +1344,10 @@ class SSHLHelperApp:
     def set_status_text(self):
         running = sum(1 for tunnel in self.tunnels if self.is_running(tunnel.id))
         tray_text = "托盘已启用" if self.tray is not None else f"托盘不可用：{self.tray_error or '未启用'}"
-        self.status_var.set(f"{len(self.tunnels)} 个配置，{running} 个运行中，{tray_text}，配置文件：{CONFIG_PATH}")
+        startup_text = "开机自启动已启用" if self.startup_var.get() else "开机自启动未启用"
+        self.status_var.set(
+            f"{len(self.tunnels)} 个配置，{running} 个运行中，{tray_text}，{startup_text}，配置文件：{CONFIG_PATH}"
+        )
         self.update_tray_tooltip()
 
     def is_active(self, runtime):
@@ -1281,6 +1559,8 @@ class SSHLHelperApp:
                     self.show_from_tray()
                 elif kind == "tray_exit":
                     self.request_exit()
+                elif kind == "show_existing_instance":
+                    self.show_from_tray()
         except queue.Empty:
             pass
 
@@ -1368,6 +1648,9 @@ class SSHLHelperApp:
         if self.tray is not None:
             self.tray.stop()
             self.tray = None
+        if self.instance_guard is not None:
+            self.instance_guard.close()
+            self.instance_guard = None
         self.root.destroy()
 
     def drain_events_once(self):
@@ -1384,6 +1667,8 @@ class SSHLHelperApp:
                     self.show_from_tray()
                 elif event[0] == "tray_exit":
                     self.request_exit()
+                elif event[0] == "show_existing_instance":
+                    self.show_from_tray()
         except queue.Empty:
             pass
 
@@ -1436,8 +1721,12 @@ def main():
         time.sleep(0.3)
         tray.stop()
         return
+    instance_guard = SingleInstanceGuard()
+    if not instance_guard.acquire():
+        return
     root = tk.Tk()
-    SSHLHelperApp(root)
+    app = SSHLHelperApp(root, instance_guard=instance_guard)
+    instance_guard.start_listener(app.request_show_from_other_instance)
     root.mainloop()
 
 

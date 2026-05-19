@@ -34,6 +34,12 @@ python -m pip install pyinstaller
 
 生成的独立可执行文件位于 `dist\CommandTray.exe`，可以直接双击运行。打包版本会在 exe 所在目录读写 `config.json`。
 
+## 单实例和自启动
+
+同一台电脑同一用户下只会运行一个 Command Tray。再次双击程序时，不会启动第二个进程，而是显示已经运行的主窗口。
+
+界面右上角的“开机自启动”可以写入或移除当前用户的 Windows 启动项。启用后，程序会随登录启动并隐藏到系统托盘。
+
 ## 发布 Release
 
 本项目使用 GitHub CLI 发布构建好的 exe。先安装并登录：
