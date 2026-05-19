@@ -18,6 +18,22 @@ python .\main.pyw
 
 也可以直接双击 `main.pyw`。
 
+## 打包 EXE
+
+需要安装 PyInstaller：
+
+```powershell
+python -m pip install pyinstaller
+```
+
+然后运行：
+
+```powershell
+.\build.ps1
+```
+
+生成的独立可执行文件位于 `dist\CommandTray.exe`，可以直接双击运行。打包版本会在 exe 所在目录读写 `config.json`。
+
 ## 后台运行
 
 在 Windows 上点击窗口的关闭按钮或最小化按钮时，程序会隐藏到系统托盘，已启动的命令会继续运行。托盘图标支持：

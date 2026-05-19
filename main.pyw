@@ -16,7 +16,13 @@ import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 
 
-APP_DIR = Path(__file__).resolve().parent
+def get_app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = get_app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 APP_NAME = "Command Tray"
 LOG_LIMIT = 1000
