@@ -34,6 +34,23 @@ python -m pip install pyinstaller
 
 生成的独立可执行文件位于 `dist\CommandTray.exe`，可以直接双击运行。打包版本会在 exe 所在目录读写 `config.json`。
 
+## 发布 Release
+
+本项目使用 GitHub CLI 发布构建好的 exe。先安装并登录：
+
+```powershell
+winget install --id GitHub.cli
+gh auth login
+```
+
+确认工作区已提交后，运行：
+
+```powershell
+.\release.ps1 -Version v0.1.0
+```
+
+脚本会重新打包、创建并推送同名 tag，然后把 `dist\CommandTray.exe` 上传到 GitHub Release。实际运行配置 `config.json` 不会被上传，避免泄露本机命令或主机信息。
+
 ## 后台运行
 
 在 Windows 上点击窗口的关闭按钮或最小化按钮时，程序会隐藏到系统托盘，已启动的命令会继续运行。托盘图标支持：
