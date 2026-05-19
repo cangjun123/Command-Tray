@@ -2,6 +2,72 @@
 
 一个用于管理 `ssh -L` 本地端口转发和其他长时间运行命令的小型 Windows 桌面工具。每条配置都可以在界面里像开关一样启动或停止。
 
+## 常用场景
+
+Command Tray 适合管理那些需要长期运行、但不想一直占着终端窗口的命令。程序可以最小化到系统托盘，命令异常退出时会显示状态并保留日志。
+
+### 访问远程 Jupyter、Web 服务或模型服务
+
+服务器上的服务通常只监听 `127.0.0.1`，本机浏览器不能直接访问。可以把远程端口映射到本地：
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -L 8888:127.0.0.1:8888 user@server
+```
+
+启动后在本机打开 `http://127.0.0.1:8888`。这类配置适合远程 Jupyter Notebook、TensorBoard、Gradio、FastAPI、模型推理服务等。
+
+### 访问远程数据库或内网服务
+
+把远程服务器或内网机器上的数据库端口映射到本地，再用本机客户端连接：
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -L 5432:127.0.0.1:5432 user@db-server
+ssh -N -o ExitOnForwardFailure=yes -L 6379:127.0.0.1:6379 user@redis-server
+ssh -N -o ExitOnForwardFailure=yes -L 3306:127.0.0.1:3306 user@mysql-server
+```
+
+本机工具里连接 `127.0.0.1:5432`、`127.0.0.1:6379` 或 `127.0.0.1:3306` 即可。
+
+### 保持反向端口转发
+
+如果本机服务需要临时暴露给远程服务器，可以使用 `ssh -R`：
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -R 9000:127.0.0.1:9000 user@server
+```
+
+适合调试 webhook、本地 API 回调、临时演示服务等。
+
+### 管理本地开发服务
+
+可以把常用开发命令放进 Command Tray，避免打开多个终端窗口：
+
+```powershell
+npm run dev
+python -m http.server 8000
+uvicorn app:app --host 127.0.0.1 --port 8000 --reload
+streamlit run app.py
+```
+
+每个服务都可以单独开启、关闭、查看日志。
+
+### 启动本地后台脚本或代理
+
+适合启动一些不需要交互输入、但需要一直运行的小脚本：
+
+```powershell
+python .\sync_files.py
+python .\worker.py
+cloudflared tunnel run my-tunnel
+ping 127.0.0.1 -t
+```
+
+如果脚本自己退出并返回非 0 退出码，界面会标记为异常退出。
+
+### 开机自动恢复工作环境
+
+可以在界面里勾选“开机自启动”，让 Command Tray 随 Windows 登录启动并隐藏到托盘。再给具体命令勾选“启动程序时自动开启”，就能在开机后自动恢复常用 SSH 隧道或本地服务。
+
 ## 运行
 
 需要本机已安装 Python 3，并且 `ssh` 命令可在系统 PATH 中直接运行。
