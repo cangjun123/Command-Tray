@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
@@ -36,6 +36,9 @@ ICON_PATH = RESOURCE_DIR / "icon.ico"
 APP_NAME = "Command Tray"
 LOG_LIMIT = 1000
 STOP_TIMEOUT_SECONDS = 3
+RETRY_INITIAL_DELAY_SECONDS = 3
+RETRY_MAX_DELAY_SECONDS = 60
+RETRY_RESET_AFTER_SECONDS = 300
 SINGLE_INSTANCE_MUTEX = "Local\\cangjun.CommandTray.SingleInstance"
 SINGLE_INSTANCE_WINDOW_CLASS = "cangjun.CommandTray.SingleInstanceWindow"
 SHOW_MAIN_WINDOW_MESSAGE = 0x8000 + 2
@@ -54,11 +57,55 @@ def set_tk_window_icon(window):
 
 
 @dataclass
+class AutoRetryConfig:
+    enabled: bool = False
+    max_attempts: int = 0
+    initial_delay_seconds: int = RETRY_INITIAL_DELAY_SECONDS
+    max_delay_seconds: int = RETRY_MAX_DELAY_SECONDS
+    reset_after_seconds: int = RETRY_RESET_AFTER_SECONDS
+
+
+@dataclass
 class TunnelConfig:
     id: str
     name: str
     command: str
     enabled_on_start: bool = False
+    auto_retry: AutoRetryConfig = field(default_factory=AutoRetryConfig)
+
+
+def read_nonnegative_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(parsed, 0)
+
+
+def parse_auto_retry_config(value):
+    if isinstance(value, bool):
+        return AutoRetryConfig(enabled=value)
+    if not isinstance(value, dict):
+        return AutoRetryConfig()
+    return AutoRetryConfig(
+        enabled=bool(value.get("enabled", False)),
+        max_attempts=read_nonnegative_int(value.get("max_attempts"), 0),
+        initial_delay_seconds=read_nonnegative_int(
+            value.get("initial_delay_seconds"),
+            RETRY_INITIAL_DELAY_SECONDS,
+        )
+        or RETRY_INITIAL_DELAY_SECONDS,
+        max_delay_seconds=read_nonnegative_int(
+            value.get("max_delay_seconds"),
+            RETRY_MAX_DELAY_SECONDS,
+        )
+        or RETRY_MAX_DELAY_SECONDS,
+        reset_after_seconds=read_nonnegative_int(
+            value.get("reset_after_seconds"),
+            RETRY_RESET_AFTER_SECONDS,
+        )
+        or RETRY_RESET_AFTER_SECONDS,
+    )
 
 
 class TunnelRuntime:
@@ -69,6 +116,10 @@ class TunnelRuntime:
         self.started_at = None
         self.returncode = None
         self.stop_requested = False
+        self.retry_attempts = 0
+        self.retry_after_id = None
+        self.retry_due_at = None
+        self.retry_generation = 0
 
 
 class TunnelDialog:
@@ -83,6 +134,9 @@ class TunnelDialog:
 
         self.name_var = tk.StringVar(value=(initial.name if initial else ""))
         self.autostart_var = tk.BooleanVar(value=(initial.enabled_on_start if initial else False))
+        retry_config = initial.auto_retry if initial else AutoRetryConfig()
+        self.retry_enabled_var = tk.BooleanVar(value=retry_config.enabled)
+        self.retry_max_attempts_var = tk.StringVar(value=str(retry_config.max_attempts))
 
         frame = ttk.Frame(self.window, padding=14)
         frame.grid(row=0, column=0, sticky="nsew")
@@ -104,8 +158,22 @@ class TunnelDialog:
         checkbox = ttk.Checkbutton(frame, text="启动程序时自动开启", variable=self.autostart_var)
         checkbox.grid(row=2, column=1, sticky="w", pady=(0, 12))
 
+        retry_checkbox = ttk.Checkbutton(frame, text="异常退出后自动重试", variable=self.retry_enabled_var)
+        retry_checkbox.grid(row=3, column=1, sticky="w", pady=(0, 8))
+
+        retry_frame = ttk.Frame(frame)
+        retry_frame.grid(row=4, column=1, sticky="w", pady=(0, 12))
+        ttk.Label(retry_frame, text="最多重试次数").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        retry_entry = ttk.Entry(retry_frame, textvariable=self.retry_max_attempts_var, width=8)
+        retry_entry.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ttk.Label(retry_frame, text="0 表示无限，间隔按 3/6/12 秒递增，最多 60 秒").grid(
+            row=0,
+            column=2,
+            sticky="w",
+        )
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="e")
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e")
         ttk.Button(buttons, text="取消", command=self.window.destroy).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="保存", command=self.save).grid(row=0, column=1)
 
@@ -139,11 +207,23 @@ class TunnelDialog:
         if not command:
             messagebox.showwarning("缺少命令", "请填写 SSH 命令。", parent=self.window)
             return
+        try:
+            max_attempts = int(self.retry_max_attempts_var.get().strip() or "0")
+        except ValueError:
+            messagebox.showwarning("重试次数无效", "最多重试次数必须是非负整数，0 表示无限重试。", parent=self.window)
+            return
+        if max_attempts < 0:
+            messagebox.showwarning("重试次数无效", "最多重试次数不能小于 0。", parent=self.window)
+            return
 
         self.result = {
             "name": name,
             "command": command,
             "enabled_on_start": self.autostart_var.get(),
+            "auto_retry": AutoRetryConfig(
+                enabled=self.retry_enabled_var.get(),
+                max_attempts=max_attempts,
+            ),
         }
         self.window.destroy()
 
@@ -975,6 +1055,7 @@ class SSHLHelperApp:
         self.tray = None
         self.tray_error = ""
         self.startup_var = tk.BooleanVar(value=WindowsStartupManager.is_enabled())
+        self.retry_refresh_after_id = None
 
         self.configure_fonts()
         self.configure_style()
@@ -1198,6 +1279,7 @@ class SSHLHelperApp:
                         name=name,
                         command=command,
                         enabled_on_start=bool(item.get("enabled_on_start", False)),
+                        auto_retry=parse_auto_retry_config(item.get("auto_retry")),
                     )
                 )
             self.tunnels = loaded
@@ -1252,9 +1334,9 @@ class SSHLHelperApp:
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="名称", width=18, style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
         ttk.Label(header, text="命令", style="Header.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="状态", width=13, style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 10))
+        ttk.Label(header, text="状态", width=16, style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 10))
         ttk.Label(header, text="PID", width=8, style="Header.TLabel").grid(row=0, column=3, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="操作", width=30, style="Header.TLabel").grid(row=0, column=4, sticky="w")
+        ttk.Label(header, text="操作", width=38, style="Header.TLabel").grid(row=0, column=4, sticky="w")
 
         if not self.tunnels:
             empty = ttk.Label(
@@ -1281,12 +1363,14 @@ class SSHLHelperApp:
         name_text = tunnel.name
         if tunnel.enabled_on_start:
             name_text += "  [自启]"
+        if tunnel.auto_retry.enabled:
+            name_text += "  [重试]"
         ttk.Label(row, text=name_text, width=18).grid(row=0, column=0, sticky="w", padx=(0, 10))
         command_label = ttk.Label(row, text=self.command_summary(tunnel.command), anchor="w")
         command_label.grid(row=0, column=1, sticky="ew", padx=(0, 10))
 
         status_text, status_style = self.status_display(runtime)
-        ttk.Label(row, text=status_text, width=13, style=status_style).grid(row=0, column=2, sticky="w", padx=(0, 10))
+        ttk.Label(row, text=status_text, width=16, style=status_style).grid(row=0, column=2, sticky="w", padx=(0, 10))
 
         pid = "-"
         if runtime.process is not None and runtime.process.poll() is None:
@@ -1296,7 +1380,10 @@ class SSHLHelperApp:
         buttons = ttk.Frame(row)
         buttons.grid(row=0, column=4, sticky="w")
 
-        toggle_text = "关闭" if self.is_active(runtime) else "开启"
+        if runtime.status == "waiting_retry":
+            toggle_text = "重试"
+        else:
+            toggle_text = "关闭" if self.is_active(runtime) else "开启"
         toggle_state = "disabled" if runtime.status in ("starting", "stopping") else "normal"
         ttk.Button(
             buttons,
@@ -1305,24 +1392,33 @@ class SSHLHelperApp:
             state=toggle_state,
             command=lambda tunnel_id=tunnel.id: self.toggle_tunnel(tunnel_id),
         ).grid(row=0, column=0, padx=(0, 6))
+        column_offset = 1
+        if runtime.status == "waiting_retry":
+            ttk.Button(
+                buttons,
+                text="取消",
+                width=6,
+                command=lambda tunnel_id=tunnel.id: self.stop_tunnel(tunnel_id),
+            ).grid(row=0, column=1, padx=(0, 6))
+            column_offset = 2
         ttk.Button(
             buttons,
             text="编辑",
             width=6,
             command=lambda tunnel_id=tunnel.id: self.edit_tunnel(tunnel_id),
-        ).grid(row=0, column=1, padx=(0, 6))
+        ).grid(row=0, column=column_offset, padx=(0, 6))
         ttk.Button(
             buttons,
             text="日志",
             width=6,
             command=lambda tunnel_id=tunnel.id: self.show_logs(tunnel_id),
-        ).grid(row=0, column=2, padx=(0, 6))
+        ).grid(row=0, column=column_offset + 1, padx=(0, 6))
         ttk.Button(
             buttons,
             text="删除",
             width=6,
             command=lambda tunnel_id=tunnel.id: self.delete_tunnel(tunnel_id),
-        ).grid(row=0, column=3)
+        ).grid(row=0, column=column_offset + 2)
 
     def command_summary(self, command):
         command = " ".join(command.split())
@@ -1337,16 +1433,25 @@ class SSHLHelperApp:
             return "启动中", "StatusBusy.TLabel"
         if runtime.status == "stopping":
             return "停止中", "StatusBusy.TLabel"
+        if runtime.status == "waiting_retry":
+            return f"等待重试 {self.retry_remaining_seconds(runtime)}s", "StatusBusy.TLabel"
         if runtime.status == "error":
             return "异常退出", "StatusError.TLabel"
         return "已停止", "StatusStopped.TLabel"
 
+    def retry_remaining_seconds(self, runtime):
+        if runtime.retry_due_at is None:
+            return 0
+        return max(0, int(runtime.retry_due_at - time.time() + 0.999))
+
     def set_status_text(self):
         running = sum(1 for tunnel in self.tunnels if self.is_running(tunnel.id))
+        waiting_retry = sum(1 for tunnel in self.tunnels if self.runtime_for(tunnel.id).status == "waiting_retry")
         tray_text = "托盘已启用" if self.tray is not None else f"托盘不可用：{self.tray_error or '未启用'}"
         startup_text = "开机自启动已启用" if self.startup_var.get() else "开机自启动未启用"
+        retry_text = f"{waiting_retry} 个等待重试，" if waiting_retry else ""
         self.status_var.set(
-            f"{len(self.tunnels)} 个配置，{running} 个运行中，{tray_text}，{startup_text}，配置文件：{CONFIG_PATH}"
+            f"{len(self.tunnels)} 个配置，{running} 个运行中，{retry_text}{tray_text}，{startup_text}，配置文件：{CONFIG_PATH}"
         )
         self.update_tray_tooltip()
 
@@ -1365,6 +1470,7 @@ class SSHLHelperApp:
             name=dialog.result["name"],
             command=dialog.result["command"],
             enabled_on_start=dialog.result["enabled_on_start"],
+            auto_retry=dialog.result["auto_retry"],
         )
         self.tunnels.append(tunnel)
         self.save_config()
@@ -1381,6 +1487,7 @@ class SSHLHelperApp:
         tunnel.name = dialog.result["name"]
         tunnel.command = dialog.result["command"]
         tunnel.enabled_on_start = dialog.result["enabled_on_start"]
+        tunnel.auto_retry = dialog.result["auto_retry"]
         self.save_config()
         self.refresh_rows()
 
@@ -1393,6 +1500,7 @@ class SSHLHelperApp:
             return
         if not messagebox.askyesno("确认删除", f"确定删除“{tunnel.name}”吗？", parent=self.root):
             return
+        self.cancel_retry(tunnel_id)
         self.tunnels = [item for item in self.tunnels if item.id != tunnel_id]
         if tunnel_id in self.log_windows:
             self.log_windows[tunnel_id].close()
@@ -1411,7 +1519,7 @@ class SSHLHelperApp:
             if tunnel.enabled_on_start:
                 self.start_tunnel(tunnel.id)
 
-    def start_tunnel(self, tunnel_id):
+    def start_tunnel(self, tunnel_id, from_retry=False):
         tunnel = self.find_tunnel(tunnel_id)
         if tunnel is None:
             return
@@ -1419,6 +1527,9 @@ class SSHLHelperApp:
         if self.is_active(runtime):
             return
 
+        self.cancel_retry(tunnel_id)
+        if not from_retry:
+            runtime.retry_attempts = 0
         runtime.status = "starting"
         runtime.returncode = None
         runtime.stop_requested = False
@@ -1449,6 +1560,8 @@ class SSHLHelperApp:
             runtime.process = None
             runtime.returncode = None
             self.add_log(tunnel_id, f"启动失败：{exc}")
+            if self.schedule_retry(tunnel_id, "启动失败"):
+                return
             self.refresh_rows()
             return
 
@@ -1476,14 +1589,104 @@ class SSHLHelperApp:
                 returncode = None
             self.events.put(("exited", tunnel_id, process.pid, returncode))
 
+    def retry_delay_seconds(self, retry_config, attempt):
+        initial_delay = max(1, retry_config.initial_delay_seconds)
+        max_delay = max(initial_delay, retry_config.max_delay_seconds)
+        delay = initial_delay * (2 ** max(attempt - 1, 0))
+        return min(delay, max_delay)
+
+    def schedule_retry(self, tunnel_id, reason):
+        if self.closing:
+            return False
+        tunnel = self.find_tunnel(tunnel_id)
+        if tunnel is None or not tunnel.auto_retry.enabled:
+            return False
+
+        runtime = self.runtime_for(tunnel_id)
+        retry_config = tunnel.auto_retry
+        if retry_config.max_attempts > 0 and runtime.retry_attempts >= retry_config.max_attempts:
+            runtime.status = "error"
+            runtime.retry_due_at = None
+            self.add_log(tunnel_id, f"自动重试已停止：已达到最多 {retry_config.max_attempts} 次。")
+            self.notify_user(
+                f"{APP_NAME}: 自动重试已停止",
+                f"{tunnel.name} 已达到最多 {retry_config.max_attempts} 次重试。请打开日志查看原因。",
+                warning=True,
+            )
+            self.refresh_rows()
+            return True
+
+        runtime.retry_attempts += 1
+        delay = self.retry_delay_seconds(retry_config, runtime.retry_attempts)
+        runtime.retry_due_at = time.time() + delay
+        runtime.retry_generation += 1
+        generation = runtime.retry_generation
+        runtime.status = "waiting_retry"
+        runtime.process = None
+        runtime.retry_after_id = self.root.after(
+            delay * 1000,
+            lambda: self.run_scheduled_retry(tunnel_id, generation),
+        )
+        max_attempts_text = "无限" if retry_config.max_attempts == 0 else str(retry_config.max_attempts)
+        self.add_log(
+            tunnel_id,
+            f"{reason}，自动重试已启用，{delay} 秒后进行第 {runtime.retry_attempts} 次重试（最多 {max_attempts_text} 次）。",
+        )
+        self.refresh_rows()
+        self.ensure_retry_countdown_refresh()
+        return True
+
+    def run_scheduled_retry(self, tunnel_id, generation):
+        runtime = self.runtime_for(tunnel_id)
+        if runtime.retry_generation != generation or runtime.status != "waiting_retry":
+            return
+        runtime.retry_after_id = None
+        runtime.retry_due_at = None
+        self.add_log(tunnel_id, f"正在自动重试，第 {runtime.retry_attempts} 次。")
+        self.start_tunnel(tunnel_id, from_retry=True)
+
+    def cancel_retry(self, tunnel_id, log=False):
+        runtime = self.runtime_for(tunnel_id)
+        if runtime.retry_after_id is not None:
+            try:
+                self.root.after_cancel(runtime.retry_after_id)
+            except tk.TclError:
+                pass
+        was_waiting = runtime.status == "waiting_retry"
+        runtime.retry_after_id = None
+        runtime.retry_due_at = None
+        runtime.retry_generation += 1
+        if was_waiting:
+            runtime.status = "stopped"
+            if log:
+                self.add_log(tunnel_id, "已取消等待中的自动重试。")
+
+    def ensure_retry_countdown_refresh(self):
+        if self.retry_refresh_after_id is None and not self.closing:
+            self.retry_refresh_after_id = self.root.after(1000, self.refresh_retry_countdowns)
+
+    def refresh_retry_countdowns(self):
+        self.retry_refresh_after_id = None
+        if self.closing:
+            return
+        if any(self.runtime_for(tunnel.id).status == "waiting_retry" for tunnel in self.tunnels):
+            self.refresh_rows()
+            self.ensure_retry_countdown_refresh()
+
     def stop_tunnel(self, tunnel_id):
         runtime = self.runtime_for(tunnel_id)
+        if runtime.status == "waiting_retry":
+            self.cancel_retry(tunnel_id, log=True)
+            self.refresh_rows()
+            return
         process = runtime.process
         if process is None or process.poll() is not None:
             runtime.status = "stopped"
+            self.cancel_retry(tunnel_id)
             self.refresh_rows()
             return
 
+        self.cancel_retry(tunnel_id)
         runtime.stop_requested = True
         runtime.status = "stopping"
         self.add_log(tunnel_id, f"正在停止进程，PID={process.pid}")
@@ -1519,7 +1722,8 @@ class SSHLHelperApp:
 
     def stop_all(self):
         for tunnel in self.tunnels:
-            if self.is_running(tunnel.id):
+            runtime = self.runtime_for(tunnel.id)
+            if self.is_running(tunnel.id) or runtime.status == "waiting_retry":
                 self.stop_tunnel(tunnel.id)
 
     def any_running(self):
@@ -1572,17 +1776,27 @@ class SSHLHelperApp:
         if runtime.process is None or runtime.process.pid != pid:
             return
         runtime.returncode = returncode
+        tunnel = self.find_tunnel(tunnel_id)
 
         if runtime.stop_requested:
             runtime.status = "stopped"
+            runtime.retry_attempts = 0
             self.add_log(tunnel_id, f"进程已停止，退出码={returncode}")
         elif returncode == 0:
             runtime.status = "stopped"
+            runtime.retry_attempts = 0
             self.add_log(tunnel_id, "进程已退出，退出码=0")
         else:
             runtime.status = "error"
             self.add_log(tunnel_id, f"进程异常退出，退出码={returncode}")
-            tunnel = self.find_tunnel(tunnel_id)
+            if tunnel is not None and runtime.started_at is not None:
+                ran_for = time.time() - runtime.started_at
+                if ran_for >= tunnel.auto_retry.reset_after_seconds:
+                    runtime.retry_attempts = 0
+            runtime.process = None
+            runtime.stop_requested = False
+            if self.schedule_retry(tunnel_id, "进程异常退出"):
+                return
             name = tunnel.name if tunnel is not None else tunnel_id
             self.notify_user(
                 f"{APP_NAME}: 命令异常退出",
@@ -1645,6 +1859,14 @@ class SSHLHelperApp:
         self.destroy_app()
 
     def destroy_app(self):
+        for tunnel in self.tunnels:
+            self.cancel_retry(tunnel.id)
+        if self.retry_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.retry_refresh_after_id)
+            except tk.TclError:
+                pass
+            self.retry_refresh_after_id = None
         if self.tray is not None:
             self.tray.stop()
             self.tray = None

@@ -106,6 +106,19 @@ python -m pip install pyinstaller
 
 界面右上角的“开机自启动”可以写入或移除当前用户的 Windows 启动项。启用后，程序会随登录启动并隐藏到系统托盘。
 
+## 自动重试
+
+每条命令都可以在新增或编辑窗口里勾选“异常退出后自动重试”，适合 SSH 隧道、远程服务端口转发、本地开发服务等容易因为网络波动中断的场景。
+
+自动重试只会在命令启动失败或异常退出时触发。用户手动点击“关闭”、“停止全部”或退出程序时，不会继续重试。
+
+重试间隔采用递增退避：默认 3 秒、6 秒、12 秒、24 秒、48 秒，之后最多 60 秒一次。如果命令连续运行超过 5 分钟后再异常退出，失败次数会清零，从第 1 次重试重新开始计算。
+
+“最多重试次数”填 `0` 表示无限重试。等待重试时，状态栏会显示倒计时；该行按钮会变成：
+
+- “重试”：立即取消等待并马上启动
+- “取消”：取消等待中的自动重试
+
 ## 发布 Release
 
 本项目使用 GitHub CLI 发布构建好的 exe。先安装并登录：
@@ -160,7 +173,14 @@ ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 root@39.102.124.3
       "id": "example_8080",
       "name": "示例 8080",
       "command": "ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 root@39.102.124.3",
-      "enabled_on_start": false
+      "enabled_on_start": false,
+      "auto_retry": {
+        "enabled": true,
+        "max_attempts": 0,
+        "initial_delay_seconds": 3,
+        "max_delay_seconds": 60,
+        "reset_after_seconds": 300
+      }
     }
   ]
 }
