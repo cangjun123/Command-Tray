@@ -1327,16 +1327,46 @@ class SSHLHelperApp:
         for child in self.rows_frame.winfo_children():
             child.destroy()
 
-        self.rows_frame.columnconfigure(0, weight=1)
+        for column in range(5):
+            self.rows_frame.columnconfigure(column, weight=0)
+        self.rows_frame.columnconfigure(1, weight=1)
 
-        header = ttk.Frame(self.rows_frame, padding=(8, 8, 8, 6))
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(1, weight=1)
-        ttk.Label(header, text="名称", width=18, style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="命令", style="Header.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="状态", width=16, style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="PID", width=8, style="Header.TLabel").grid(row=0, column=3, sticky="w", padx=(0, 10))
-        ttk.Label(header, text="操作", width=38, style="Header.TLabel").grid(row=0, column=4, sticky="w")
+        header_pady = (8, 6)
+        ttk.Label(self.rows_frame, text="名称", width=18, style="Header.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(8, 10),
+            pady=header_pady,
+        )
+        ttk.Label(self.rows_frame, text="命令", style="Header.TLabel").grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(0, 10),
+            pady=header_pady,
+        )
+        ttk.Label(self.rows_frame, text="状态", width=16, style="Header.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(0, 10),
+            pady=header_pady,
+        )
+        ttk.Label(self.rows_frame, text="PID", width=8, style="Header.TLabel").grid(
+            row=0,
+            column=3,
+            sticky="w",
+            padx=(0, 10),
+            pady=header_pady,
+        )
+        ttk.Label(self.rows_frame, text="操作", style="Header.TLabel").grid(
+            row=0,
+            column=4,
+            sticky="w",
+            padx=(0, 8),
+            pady=header_pady,
+        )
 
         if not self.tunnels:
             empty = ttk.Label(
@@ -1345,7 +1375,7 @@ class SSHLHelperApp:
                 anchor="center",
                 padding=40,
             )
-            empty.grid(row=1, column=0, sticky="ew")
+            empty.grid(row=1, column=0, columnspan=5, sticky="ew")
             self.set_status_text()
             return
 
@@ -1356,29 +1386,45 @@ class SSHLHelperApp:
 
     def render_tunnel_row(self, row_index, tunnel):
         runtime = self.runtime_for(tunnel.id)
-        row = ttk.Frame(self.rows_frame, padding=(8, 7, 8, 7))
-        row.grid(row=row_index, column=0, sticky="ew")
-        row.columnconfigure(1, weight=1)
+        row_pady = (7, 7)
 
         name_text = tunnel.name
         if tunnel.enabled_on_start:
             name_text += "  [自启]"
         if tunnel.auto_retry.enabled:
             name_text += "  [重试]"
-        ttk.Label(row, text=name_text, width=18).grid(row=0, column=0, sticky="w", padx=(0, 10))
-        command_label = ttk.Label(row, text=self.command_summary(tunnel.command), anchor="w")
-        command_label.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        ttk.Label(self.rows_frame, text=name_text, width=18).grid(
+            row=row_index,
+            column=0,
+            sticky="w",
+            padx=(8, 10),
+            pady=row_pady,
+        )
+        command_label = ttk.Label(self.rows_frame, text=self.command_summary(tunnel.command), anchor="w")
+        command_label.grid(row=row_index, column=1, sticky="ew", padx=(0, 10), pady=row_pady)
 
         status_text, status_style = self.status_display(runtime)
-        ttk.Label(row, text=status_text, width=16, style=status_style).grid(row=0, column=2, sticky="w", padx=(0, 10))
+        ttk.Label(self.rows_frame, text=status_text, width=16, style=status_style).grid(
+            row=row_index,
+            column=2,
+            sticky="w",
+            padx=(0, 10),
+            pady=row_pady,
+        )
 
         pid = "-"
         if runtime.process is not None and runtime.process.poll() is None:
             pid = str(runtime.process.pid)
-        ttk.Label(row, text=pid, width=8).grid(row=0, column=3, sticky="w", padx=(0, 10))
+        ttk.Label(self.rows_frame, text=pid, width=8).grid(
+            row=row_index,
+            column=3,
+            sticky="w",
+            padx=(0, 10),
+            pady=row_pady,
+        )
 
-        buttons = ttk.Frame(row)
-        buttons.grid(row=0, column=4, sticky="w")
+        buttons = ttk.Frame(self.rows_frame)
+        buttons.grid(row=row_index, column=4, sticky="w", padx=(0, 8), pady=row_pady)
 
         if runtime.status == "waiting_retry":
             toggle_text = "重试"
