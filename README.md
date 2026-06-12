@@ -119,6 +119,16 @@ python -m pip install pyinstaller
 - “重试”：立即取消等待并马上启动
 - “取消”：取消等待中的自动重试
 
+## 运行方式
+
+每条命令都可以选择运行方式：
+
+- `直接执行`：适合 `ssh`、`python`、`git`、`uvicorn` 这类本身就是可执行程序的命令
+- `cmd`：适合依赖 `cmd` 语法的命令，例如 `dir`、`cd xxx && npm run dev`、`echo hello > a.txt`
+- `PowerShell`：适合依赖 PowerShell 语法的命令，例如 `Get-ChildItem`、`$env:FOO='bar'`、管道和脚本块
+
+如果命令只是启动一个程序，优先使用 `直接执行`。只有命令依赖 shell 语法时，才需要选择 `cmd` 或 `PowerShell`。
+
 ## 发布 Release
 
 本项目使用 GitHub CLI 发布构建好的 exe。先安装并登录：
@@ -173,6 +183,7 @@ ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 root@39.102.124.3
       "id": "example_8080",
       "name": "示例 8080",
       "command": "ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 root@39.102.124.3",
+      "run_mode": "direct",
       "enabled_on_start": false,
       "auto_retry": {
         "enabled": true,

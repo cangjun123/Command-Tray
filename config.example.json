@@ -4,6 +4,7 @@
       "id": "example_8080",
       "name": "示例 8080",
       "command": "ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 user@example.com",
+      "run_mode": "direct",
       "enabled_on_start": false,
       "auto_retry": {
         "enabled": true,

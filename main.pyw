@@ -45,6 +45,15 @@ SHOW_MAIN_WINDOW_MESSAGE = 0x8000 + 2
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = APP_NAME
 START_HIDDEN_ARG = "--start-hidden"
+RUN_MODE_DIRECT = "direct"
+RUN_MODE_CMD = "cmd"
+RUN_MODE_POWERSHELL = "powershell"
+RUN_MODE_OPTIONS = [
+    (RUN_MODE_DIRECT, "直接执行"),
+    (RUN_MODE_CMD, "cmd"),
+    (RUN_MODE_POWERSHELL, "PowerShell"),
+]
+RUN_MODE_LABELS = {value: label for value, label in RUN_MODE_OPTIONS}
 
 
 def set_tk_window_icon(window):
@@ -70,6 +79,7 @@ class TunnelConfig:
     id: str
     name: str
     command: str
+    run_mode: str = RUN_MODE_DIRECT
     enabled_on_start: bool = False
     auto_retry: AutoRetryConfig = field(default_factory=AutoRetryConfig)
 
@@ -108,6 +118,12 @@ def parse_auto_retry_config(value):
     )
 
 
+def normalize_run_mode(value):
+    if value in RUN_MODE_LABELS:
+        return value
+    return RUN_MODE_DIRECT
+
+
 class TunnelRuntime:
     def __init__(self):
         self.process = None
@@ -133,6 +149,7 @@ class TunnelDialog:
         self.window.resizable(True, False)
 
         self.name_var = tk.StringVar(value=(initial.name if initial else ""))
+        self.run_mode_var = tk.StringVar(value=RUN_MODE_LABELS[normalize_run_mode(initial.run_mode if initial else None)])
         self.autostart_var = tk.BooleanVar(value=(initial.enabled_on_start if initial else False))
         retry_config = initial.auto_retry if initial else AutoRetryConfig()
         self.retry_enabled_var = tk.BooleanVar(value=retry_config.enabled)
@@ -155,14 +172,24 @@ class TunnelDialog:
         if command_readonly:
             self.command_text.configure(state="disabled", background="#f3f3f3")
 
+        ttk.Label(frame, text="运行方式").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(0, 8))
+        run_mode_combo = ttk.Combobox(
+            frame,
+            textvariable=self.run_mode_var,
+            values=[label for _value, label in RUN_MODE_OPTIONS],
+            state="readonly",
+            width=18,
+        )
+        run_mode_combo.grid(row=2, column=1, sticky="w", pady=(0, 8))
+
         checkbox = ttk.Checkbutton(frame, text="启动程序时自动开启", variable=self.autostart_var)
-        checkbox.grid(row=2, column=1, sticky="w", pady=(0, 12))
+        checkbox.grid(row=3, column=1, sticky="w", pady=(0, 12))
 
         retry_checkbox = ttk.Checkbutton(frame, text="异常退出后自动重试", variable=self.retry_enabled_var)
-        retry_checkbox.grid(row=3, column=1, sticky="w", pady=(0, 8))
+        retry_checkbox.grid(row=4, column=1, sticky="w", pady=(0, 8))
 
         retry_frame = ttk.Frame(frame)
-        retry_frame.grid(row=4, column=1, sticky="w", pady=(0, 12))
+        retry_frame.grid(row=5, column=1, sticky="w", pady=(0, 12))
         ttk.Label(retry_frame, text="最多重试次数").grid(row=0, column=0, sticky="w", padx=(0, 8))
         retry_entry = ttk.Entry(retry_frame, textvariable=self.retry_max_attempts_var, width=8)
         retry_entry.grid(row=0, column=1, sticky="w", padx=(0, 8))
@@ -173,7 +200,7 @@ class TunnelDialog:
         )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="e")
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e")
         ttk.Button(buttons, text="取消", command=self.window.destroy).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="保存", command=self.save).grid(row=0, column=1)
 
@@ -219,6 +246,7 @@ class TunnelDialog:
         self.result = {
             "name": name,
             "command": command,
+            "run_mode": next(value for value, label in RUN_MODE_OPTIONS if label == self.run_mode_var.get()),
             "enabled_on_start": self.autostart_var.get(),
             "auto_retry": AutoRetryConfig(
                 enabled=self.retry_enabled_var.get(),
@@ -1278,6 +1306,7 @@ class SSHLHelperApp:
                         id=tunnel_id,
                         name=name,
                         command=command,
+                        run_mode=normalize_run_mode(item.get("run_mode")),
                         enabled_on_start=bool(item.get("enabled_on_start", False)),
                         auto_retry=parse_auto_retry_config(item.get("auto_retry")),
                     )
@@ -1400,7 +1429,10 @@ class SSHLHelperApp:
             padx=(8, 10),
             pady=row_pady,
         )
-        command_label = ttk.Label(self.rows_frame, text=self.command_summary(tunnel.command), anchor="w")
+        command_summary = self.command_summary(tunnel.command)
+        if tunnel.run_mode != RUN_MODE_DIRECT:
+            command_summary = f"[{RUN_MODE_LABELS[tunnel.run_mode]}] {command_summary}"
+        command_label = ttk.Label(self.rows_frame, text=command_summary, anchor="w")
         command_label.grid(row=row_index, column=1, sticky="ew", padx=(0, 10), pady=row_pady)
 
         status_text, status_style = self.status_display(runtime)
@@ -1515,6 +1547,7 @@ class SSHLHelperApp:
             id=self.generate_id(dialog.result["name"]),
             name=dialog.result["name"],
             command=dialog.result["command"],
+            run_mode=dialog.result["run_mode"],
             enabled_on_start=dialog.result["enabled_on_start"],
             auto_retry=dialog.result["auto_retry"],
         )
@@ -1532,6 +1565,7 @@ class SSHLHelperApp:
             return
         tunnel.name = dialog.result["name"]
         tunnel.command = dialog.result["command"]
+        tunnel.run_mode = dialog.result["run_mode"]
         tunnel.enabled_on_start = dialog.result["enabled_on_start"]
         tunnel.auto_retry = dialog.result["auto_retry"]
         self.save_config()
@@ -1584,7 +1618,7 @@ class SSHLHelperApp:
         self.refresh_rows()
 
         try:
-            popen_args, shell = self.build_popen_args(tunnel.command)
+            popen_args, shell = self.build_popen_args(tunnel)
             creationflags = 0
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -1617,8 +1651,14 @@ class SSHLHelperApp:
         threading.Thread(target=self.read_process_output, args=(tunnel_id, process), daemon=True).start()
         self.refresh_rows()
 
-    def build_popen_args(self, command):
+    def build_popen_args(self, tunnel):
+        command = tunnel.command
+        run_mode = normalize_run_mode(tunnel.run_mode)
         if os.name == "nt":
+            if run_mode == RUN_MODE_CMD:
+                return ["cmd.exe", "/d", "/c", command], False
+            if run_mode == RUN_MODE_POWERSHELL:
+                return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], False
             return command, False
         return shlex.split(command), False
 
